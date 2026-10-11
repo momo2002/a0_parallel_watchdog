@@ -1,11 +1,13 @@
 """Testy jednostkowe _parallel_watchdog (D19-A) — faza RED (TDD).
 
-Oracle wprost z briefu D19-A:
+Oracle wprost z briefu D19-A + erraty po review in vivo (2026-10-11):
 - tick skanuje ``context.data['_parallel_jobs']`` każdego kontekstu;
-- job w stanie ``error`` (analogicznie ``timeout``/``cancelled``) bez flagi
-  ``wake_reported`` -> ``communicate`` raz, z treścią: job_id, błąd,
-  instrukcja wznowienia ``call_subordinate context_id=... reset:false``
-  po inspekcji ``git log``/``find`` w drzewie workera;
+- job w stanie terminalnym bez flagi ``wake_reported`` -> ``communicate`` raz:
+  - ``error``/``timeout``/``cancelled``: job_id, błąd, instrukcja wznowienia
+    ``call_subordinate context_id=... reset:false`` po inspekcji
+    ``git log``/``find`` w drzewie workera;
+  - ``success`` (errata): instrukcja odbioru wyniku ``parallel await/collect
+    job_ids=[<id>]`` (raport w result), BEZ instrukcji wznowienia;
 - marker ``wake_reported`` = jedno budzenie per incydent (idempotentność);
 - brak ``_parallel_jobs`` / pusty słownik / śmieciowe dane = noop;
 - brak wyjątków, gdy kontekst parenta nie istnieje (fallback: communicate
@@ -208,10 +210,9 @@ async def test_tc_d19a_07_cancelled_state_wakes_parent():
     assert report.woken == 1
 
 
-async def test_tc_d19a_08_success_pending_running_do_not_wake():
-    """TC-08: success/pending/running nie budzą (kanał kanoniczny)."""
+async def test_tc_d19a_08_pending_running_do_not_wake():
+    """TC-08 (errata): pending/running nie budzą — job jeszcze trwa."""
     jobs = {
-        "ok": make_job(job_id="job-ok", state="success", error=None),
         "pend": make_job(job_id="job-pend", state="pending", error=None),
         "run": make_job(job_id="job-run", state="running", error=None),
     }
@@ -387,3 +388,32 @@ async def test_tc_d19a_19_default_seams_noop_on_empty_registry():
 
     assert report.woken == 0
     assert report.errors == 0
+
+
+async def test_tc_d19a_20_success_job_wakes_parent_with_collect_instructions():
+    """TC-20 (errata D19-A): success budzi z instrukcją odbioru wyniku,
+    BEZ instrukcji wznowienia; idempotentność jak dla pozostałych stanów."""
+    job = make_job(job_id="job-ok", state="success", error=None)
+    parent = context_with({"ok": job})
+    get = registry_of(parent).get
+
+    report = await WATCHDOG.tick(contexts=[parent], context_get=get)
+
+    assert len(parent.communicate_calls) == 1
+    text = parent.communicate_calls[0].message
+    assert "zakończony sukcesem" in text
+    assert "Odbierz wynik" in text
+    assert "parallel await/collect" in text
+    assert f"job_ids=[{job.id}]" in text
+    assert "raport w result" in text
+    # BEZ instrukcji wznowienia — wynik do odebrania, nie do poprawiania
+    assert "call_subordinate" not in text
+    assert "reset:false" not in text
+    assert "git log" not in text
+    assert getattr(job, "wake_reported", False) is True
+    assert report.woken == 1
+
+    report2 = await WATCHDOG.tick(contexts=[parent], context_get=get)
+    assert len(parent.communicate_calls) == 1
+    assert report2.woken == 0
+    assert report2.already_reported == 1
