@@ -7,14 +7,17 @@ terminalnym `error`/`timeout`/`cancelled`, bezczynny rodzic dowiaduje się z
 ## Jak działa
 - Extension `job_loop` (seam `helpers.job_loop.scheduler_tick`, ~60 s) skanuje
   `context.data["_parallel_jobs"]` każdego żywego kontekstu.
-- Job w stanie terminalnym (bez `success`) bez flagi `wake_reported` →
+- Job w stanie terminalnym (errata D19-A: KAŻDYM, także `success`) bez flagi `wake_reported` →
   `AgentContext.get(parent_context_id).communicate(UserMessage(...))` z treścią:
   job_id, błąd, instrukcja wznowienia (`call_subordinate context_id=<worker> reset:false`
   po inspekcji `git log`/`find`).
 - Marker `wake_reported` ustawiany dopiero PO udanym `communicate` — padnięcie
   dostarczenia = retry w następnym ticku; jeden incydent = jedno budzenie.
 - Budżet 8 budzeń/tick (TH-C-04); błąd truncowany do 1000 znaków (TH-D-07/S-01).
-- Stany `success`/`pending`/`running` nie budzą (kanoniczny kanał zbierania).
+- Treść per stan: `success` → "Odbierz wynik przez parallel await/collect
+  job_ids=[<id>] (raport w result)" (bez instrukcji wznowienia);
+  `error`/`timeout`/`cancelled` → instrukcja resume z `context_id` workera.
+- Stany `pending`/`running` nie budzą (job jeszcze trwa).
 - `Extension.execute` nigdy nie rzuca (kontrakt żywej pętli, wzorzec _roman_transport).
 
 ## Struktura

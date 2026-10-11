@@ -22,9 +22,13 @@ w ticku `job_loop` (≤60 s) z instrukcją wznowienia.
   gdy parent nie istnieje — communicate na własnym (skanowanym) kontekście (brief D19-A).
 - Marker `wake_reported` ustawiany **dopiero po udanym communicate** — padnięcie
   dostarczenia = retry w następnym ticku; jeden incydent = jedno budzenie.
-- `WAKE_STATES = TERMINAL_STATES - {success}` — sukces jest zbierany kanonicznie
-  przez `parallel await`; `timeout`/`cancelled` są dodatkowo ukryte z [EXTRAS]
-  (`build_parallel_jobs_extras` je wyklucza), więc ich budzenie jest obligatoryjne.
+- `WAKE_STATES = set(TERMINAL_STATES)` (errata D19-A po review in vivo:
+  budzenie przy KAŻDYM stanie terminalnym) — idle parent po dispatchu `wait:false`
+  nie ma tur, więc bez watchdoga także wynik `success` leży nieodebrany, dopóki
+  człowiek nie napisze. Treść PER STAN: `success` -> instrukcja odbioru wyniku
+  (`parallel await/collect job_ids=[<id>]`), BEZ instrukcji wznowienia;
+  `error`/`timeout`/`cancelled` -> instrukcja resume (`call_subordinate`
+  z kontekstem workera, `reset:false`, po inspekcji `git log`/`find`).
 - `Extension.execute` **nigdy nie rzuca** — działa w żywej pętli `job_loop`
   (kontrakt wzorca _roman_transport).
 - Budżet `MAX_WAKES_PER_TICK = 8` (TH-C-04 — burza wybudzeń); błąd truncowany do
@@ -40,7 +44,8 @@ w ticku `job_loop` (≤60 s) z instrukcją wznowienia.
 - Zmiany zachowania zaczynają się od testu (TDD: RED → GREEN → REFACTOR).
 - Nowe stany/branch'e: najpierw TC z oracle wprost z briefu/decyzji, potem kod.
 - Kolejność ticka: scan → filtr stanu → filtr markera → budżet → deliver → marker.
-- Każda zmiana `build_wake_message` musi odświeżyć asercje TC-01 (treść budzenia).
+- Każda zmiana `build_wake_message` musi odświeżyć asercje TC-01 (treść błędu/resume)
+  oraz TC-20 (treść success/odbioru — bez instrukcji wznowienia).
 
 ## Verification
 
