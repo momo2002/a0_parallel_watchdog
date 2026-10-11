@@ -1,0 +1,7 @@
+name: _parallel_watchdog
+title: Parallel Watchdog
+description: Wake idle parent agents when parallel jobs terminate with error, timeout or cancelled (job_loop tick, wake-on-error).
+version: 0.1.0
+settings_sections: []
+per_project_config: false
+per_agent_config: false
