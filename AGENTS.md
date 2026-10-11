@@ -16,7 +16,6 @@ w ticku `job_loop` (≤60 s) z instrukcją wznowienia.
 - `tests/conftest.py` — bootstrap `sys.path` (katalog główny A0).
 - `plugin.yaml` — manifest (loader frameworka czyta **plugin.yaml**, nie plugin.json —
   `META_FILE_NAME` w `helpers/plugins.py`).
-n
 ## Local Contracts
 
 - Budzenie: `AgentContext.get(job.parent_context_id).communicate(UserMessage(...))`;

@@ -24,10 +24,11 @@ odroczone adnotacje (PEP 563) wywalają ``@dataclass`` (incydent 2026-10-03,
 commit 622a0fa _roman_transport).
 """
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable
+from typing import Any
 
-from helpers.extension import Extension
+from helpers import extension
 from helpers.parallel_tools import (
     PARALLEL_JOBS_KEY,
     TERMINAL_STATES,
@@ -170,7 +171,7 @@ async def tick(
     return report
 
 
-class Extension(Extension):  # type: ignore[no-redef]
+class Extension(extension.Extension):
     """Punkt wejścia job_loop (nigdy nie rzuca — kontrakt żywej pętli)."""
 
     async def execute(self, **kwargs: Any) -> None:
