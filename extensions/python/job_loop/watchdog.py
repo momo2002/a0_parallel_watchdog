@@ -3,9 +3,10 @@
 Seam frameworka: ``helpers.job_loop.scheduler_tick`` (~60 s) woła
 ``call_extensions_async("job_loop")``. To rozszerzenie skanuje wtedy
 ``context.data["_parallel_jobs"]`` każdego żywego kontekstu (parenta) i budzi
-bezczynnego parenta, gdy job zakończył się stanem terminalnym
-``error``/``timeout``/``cancelled`` bez flagi ``wake_reported`` — bez tego
-parent dowiaduje się o padzie dopiero z [EXTRAS] przy ręcznym await (~15 min).
+bezczynnego parenta, gdy job zakończył się stanem terminalnym (errata D19-A: KAŻDYM —
+``success``/``error``/``timeout``/``cancelled``) bez flagi ``wake_reported`` —
+bez tego parent dowiaduje się dopiero z [EXTRAS] przy ręcznym await
+(~15 min); wynik ``success`` leży nieodebrany, dopóki człowiek nie napisze.
 
 Budzenie: ``AgentContext.get(job.parent_context_id).communicate(UserMessage(...))``
 z treścią: job_id, błąd, instrukcja wznowienia (``call_subordinate`` z
@@ -36,7 +37,10 @@ from helpers.parallel_tools import (
 )
 from helpers.print_style import PrintStyle
 
-WAKE_STATES = set(TERMINAL_STATES) - {"success"}
+# Errata D19-A (review in vivo 2026-10-11): budzimy przy KAZDYM stanie
+# terminalnym — idle parent po dispatchu (wait:false) nie odbierze tez
+# wyniku success, dopoki czlowiek nie napisze.
+WAKE_STATES = set(TERMINAL_STATES)
 MARKER_ATTR = "wake_reported"
 MAX_WAKES_PER_TICK = 8
 MAX_ERROR_CHARS = 1000
@@ -45,6 +49,7 @@ STATE_LABELS = {
     "error": "zakończony błędem",
     "timeout": "zakończony timeoutem (timeout)",
     "cancelled": "anulowany (cancelled)",
+    "success": "zakończony sukcesem",
 }
 
 
@@ -82,8 +87,22 @@ def _clip_error(error: str) -> str:
 
 
 def build_wake_message(job: ParallelJob) -> str:
-    """Treść budzenia wg briefu D19-A (job_id, błąd, instrukcja resume)."""
+    """Treść budzenia per stan (errata D19-A: success -> odbiór wyniku).
+
+    ``error``/``timeout``/``cancelled``: job_id, błąd, instrukcja wznowienia
+    (``call_subordinate`` z kontekstem workera, ``reset:false``). ``success``:
+    instrukcja odbioru wyniku przez ``parallel await/collect`` — BEZ
+    instrukcji wznowienia (nic nie jest zepsute, wynik czeka nieodebrany).
+    """
     state = str(job.state)
+    if state == "success":
+        # treść 1:1 z erraty D19-A (bez tool_name — komunikat krótki,
+        # narzędzie i tak widać w rekordzie joba)
+        return (
+            f"[parallel-watchdog] Job {job.id} zakończony sukcesem. "
+            "Odbierz wynik przez "
+            f"parallel await/collect job_ids=[{job.id}] (raport w result)."
+        )
     label = STATE_LABELS.get(state, f"stan terminalny {state}")
     error = str(job.error or "").strip() or "brak szczegółów błędu"
     error = _clip_error(error)
@@ -112,7 +131,8 @@ async def tick(
     """Jeden tick watchdoga (seamy wstrzykiwalne dla testów).
 
     Flow per kontekst: ``context.data['_parallel_jobs']`` (brak/pusty/
-    nie-słownik = cicho dalej) -> job w stanie z ``WAKE_STATES`` bez markera
+    nie-słownik = cicho dalej) -> job w stanie terminalnym (``WAKE_STATES``,
+    errata D19-A) bez markera
     -> ``communicate`` na kontekście parenta; gdy parent nie istnieje,
     na własnym (skanowanym) kontekście wg briefu D19-A. Marker ustawiany
     po udanym dostarczeniu; budżet ``MAX_WAKES_PER_TICK`` chroni przed
