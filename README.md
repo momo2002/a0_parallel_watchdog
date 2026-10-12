@@ -1,40 +1,69 @@
-# _parallel_watchdog (D19-A)
+# _parallel_watchdog
 
-Wake-on-error dla jobów `parallel`: gdy job async (`wait:false`) kończy się stanem
-terminalnym `error`/`timeout`/`cancelled`, bezczynny rodzic dowiaduje się z
-`[EXTRAS]` dopiero po ~15 min. Ten plugin budzi go w ≤60 s (tick `job_loop`).
+**Parallel Watchdog** — wake idle parent agents when `parallel` jobs finish.
 
-## Jak działa
-- Extension `job_loop` (seam `helpers.job_loop.scheduler_tick`, ~60 s) skanuje
-  `context.data["_parallel_jobs"]` każdego żywego kontekstu.
-- Job w stanie terminalnym (errata D19-A: KAŻDYM, także `success`) bez flagi `wake_reported` →
-  `AgentContext.get(parent_context_id).communicate(UserMessage(...))` z treścią:
-  job_id, błąd, instrukcja wznowienia (`call_subordinate context_id=<worker> reset:false`
-  po inspekcji `git log`/`find`).
-- Marker `wake_reported` ustawiany dopiero PO udanym `communicate` — padnięcie
-  dostarczenia = retry w następnym ticku; jeden incydent = jedno budzenie.
-- Budżet 8 budzeń/tick (TH-C-04); błąd truncowany do 1000 znaków (TH-D-07/S-01).
-- Treść per stan: `success` → "Odbierz wynik przez parallel await/collect
-  job_ids=[<id>] (raport w result)" (bez instrukcji wznowienia);
-  `error`/`timeout`/`cancelled` → instrukcja resume z `context_id` workera.
-- Stany `pending`/`running` nie budzą (job jeszcze trwa).
-- `Extension.execute` nigdy nie rzuca (kontrakt żywej pętli, wzorzec _roman_transport).
+When you dispatch background jobs with `parallel` (`wait: false`) and then end your
+turn, you go **idle**: your agent loop has no turns of its own, so nothing tells
+you a job finished. The `[EXTRAS]` extras feed only appears on *your next turn* —
+which may never come. This plugin closes that gap: it wakes the parent agent with
+a short message whenever a parallel job reaches a terminal state.
 
-## Struktura
+## How it works
+
+- Extension on the `job_loop` hook point (tick ~60 s) scans
+  `context.data["_parallel_jobs"]` of every live context.
+- A job in a **terminal state** (`success`, `error`, `timeout`, `cancelled`)\  without the `wake_reported` marker wakes its parent via
+  `AgentContext.get(parent_context_id).communicate(UserMessage(...))`.
+- Message per state:
+  - `success` → "job finished, collect the result via `parallel` await/collect"
+    (no resume instructions);
+  - `error` / `timeout` / `cancelled` → includes the job id, the (truncated)
+    error, and a resume hint (`call_subordinate context_id=<worker> reset:false`
+    after inspecting the worker tree).
+- `pending` / `running` jobs never wake (the job is still going).
+- Idempotent: the `wake_reported` marker is set **only after a successful
+  `communicate`** — a failed delivery retries on the next tick; one incident
+  means one wake.
+- Budget of 8 wakes per tick protects against wake storms; errors are
+  truncated to 1000 chars against flooding/injection.
+- `Extension.execute` never raises (live-loop contract) — every tick failure
+  is logged and retried on the next tick.
+- Note: jobs cancelled *on purpose* via `parallel action:"cancel"` are removed
+  from the registry by the framework before the next tick, so they do not
+  produce a wake — intentional.
+
+## Install
+
+Clone or copy this directory into your Agent Zero plugins folder:
+
 ```
-plugin.yaml                              # manifest (loader A0 czyta plugin.yaml, nie plugin.json)
+usr/plugins/_parallel_watchdog/
+```
+
+then restart the WebUI — `job_loop` extensions load at process start. No settings,
+no configuration.
+
+## Files
+
+```
+plugin.yaml                              # manifest (loader reads plugin.yaml)
 extensions/python/job_loop/watchdog.py  # tick + Extension
-tests/test_parallel_watchdog.py          # 19 TC (TC-D19A-01..19)
+tests/test_parallel_watchdog.py          # unit tests (in-memory stubs)
 ```
 
-## Weryfikacja (runtime /opt/venv-a0)
+## Tests
+
+Run with the Agent Zero framework runtime:
+
 ```
-cd /a0/usr/repos/parallel-watchdog
-/opt/venv-a0/bin/python -m pytest tests/ -q                      # 19/19
-MYPYPATH=/a0 /opt/venv-a0/bin/python -m mypy --explicit-package-bases extensions/python/job_loop/watchdog.py  # plugin-owned: 0
-/opt/venv-a0/bin/python -m pycodestyle --max-line-length=120 extensions/ tests/  # 0
+python -m pytest tests/ -q
 ```
 
-## Wdrożenie
-DEV: `/a0/usr/repos/parallel-watchdog` → REPO: Gitea `agent0/_parallel_watchdog` →
-LIVE: `/a0/usr/plugins/_parallel_watchdog` (wyłącznie `git pull`). Push po review Cezarego.
+## Requirements
+
+- Agent Zero framework with `helpers/job_loop.py` scheduler ticks and
+  `helpers.parallel_tools.PARALLEL_JOBS_KEY` / `ParallelJob` registry.
+
+## License
+
+MIT
