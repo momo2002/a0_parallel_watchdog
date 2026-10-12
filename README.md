@@ -48,7 +48,7 @@ no configuration.
 ```
 plugin.yaml                              # manifest (loader reads plugin.yaml)
 extensions/python/job_loop/watchdog.py  # tick + Extension
-tests/testparallel_watchdog.py          # unit tests (in-memory stubs)
+tests/test_parallel_watchdog.py          # unit tests (in-memory stubs)
 ```
 
 ## Tests
