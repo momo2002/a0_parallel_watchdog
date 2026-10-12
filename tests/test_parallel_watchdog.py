@@ -1,24 +1,26 @@
-"""Testy jednostkowe _parallel_watchdog (D19-A) — faza RED (TDD).
+"""Unit tests for _parallel_watchdog (D19-A).
 
-Oracle wprost z briefu D19-A + erraty po review in vivo (2026-10-11):
-- tick skanuje ``context.data['_parallel_jobs']`` każdego kontekstu;
-- job w stanie terminalnym bez flagi ``wake_reported`` -> ``communicate`` raz:
-  - ``error``/``timeout``/``cancelled``: job_id, błąd, instrukcja wznowienia
-    ``call_subordinate context_id=... reset:false`` po inspekcji
-    ``git log``/``find`` w drzewie workera;
-  - ``success`` (errata): instrukcja odbioru wyniku ``parallel await/collect
-    job_ids=[<id>]`` (raport w result), BEZ instrukcji wznowienia;
-- marker ``wake_reported`` = jedno budzenie per incydent (idempotentność);
-- brak ``_parallel_jobs`` / pusty słownik / śmieciowe dane = noop;
-- brak wyjątków, gdy kontekst parenta nie istnieje (fallback: communicate
-  na własny, skanowany kontekst — brief D19-A);
-- ``Extension.execute`` nigdy nie rzuca (kontrakt żywej pętli job_loop).
+Oracle straight from brief D19-A plus the in-vivo review errata
+(2026-10-11):
+- the tick scans ``context.data['_parallel_jobs']`` of every context;
+- a job in a terminal state without the ``wake_reported`` flag gets
+  ``communicate`` exactly once:
+  - ``error``/``timeout``/``cancelled``: job_id, error text, resume
+    instruction ``call_subordinate context_id=... reset:false`` after
+    inspecting ``git log``/``find`` in the worker tree;
+  - ``success`` (errata): collect instruction ``parallel await/collect
+    job_ids=[<id>]`` (report in result), WITHOUT any resume instruction;
+- the ``wake_reported`` marker means one wake per incident (idempotency);
+- missing ``_parallel_jobs`` / empty dict / garbage data = quiet noop;
+- no exceptions when the parent context does not exist (fallback:
+  communicate on the scanned (own) context — brief D19-A);
+- ``Extension.execute`` never raises (live job_loop contract).
 
-Deterministyczność: stuby w pamięci, zero sieci, zero sleep, zero
-dotykania rejestru ``AgentContext._contexts`` (TH-D-08). Moduł
-``watchdog`` ładowany importlib z pliku — dokładnie jak
-``helpers.modules.import_module`` w żywym procesie (bez rejestracji w
-``sys.modules``, bez kolizji z PyPI ``watchdog``).
+Determinism: in-memory stubs, no network, no sleep, and no touching of
+the ``AgentContext._contexts`` registry (TH-D-08). The ``watchdog``
+module is loaded via importlib from file — exactly the way
+``helpers.modules.import_module`` does it in the live process (no
+sys.modules registration, no collision with the PyPI ``watchdog``).
 """
 
 import importlib.util
@@ -44,7 +46,7 @@ _SPEC.loader.exec_module(WATCHDOG)
 
 @dataclass
 class StubContext:
-    """Fałszywy AgentContext: dane + rejestrowane wywołania communicate."""
+    """Fake AgentContext: data plus recorded communicate calls."""
 
     id: str
     data: dict[str, Any] = field(default_factory=dict)
@@ -71,7 +73,7 @@ def make_job(
     worker_context_id: str | None = "workerctx1",
     parent_context_id: str = "parent1",
 ) -> ParallelJob:
-    """Deterministyczny ParallelJob (dane syntetyczne, TH-D-08)."""
+    """Deterministic ParallelJob (synthetic data, TH-D-08)."""
     return ParallelJob(
         id=job_id,
         parent_context_id=parent_context_id,
@@ -99,7 +101,7 @@ def registry_of(*contexts: StubContext) -> dict[str, StubContext]:
 
 
 async def test_tc_d19a_01_error_job_wakes_parent_once_with_resume_instructions():
-    """TC-01: job error bez markera -> communicate raz, treść wg briefu."""
+    """TC-01: error job without marker -> one communicate, brief content."""
     job = make_job()
     parent = context_with({"j1": job})
 
@@ -112,7 +114,7 @@ async def test_tc_d19a_01_error_job_wakes_parent_once_with_resume_instructions()
     assert isinstance(msg, UserMessage)
     text = msg.message
     assert job.id in text
-    assert "zakończony błędem" in text
+    assert "finished with error" in text
     assert "RuntimeError: simulated API failure" in text
     assert "call_subordinate" in text
     assert "context_id=workerctx1" in text
@@ -126,7 +128,7 @@ async def test_tc_d19a_01_error_job_wakes_parent_once_with_resume_instructions()
 
 
 async def test_tc_d19a_02_marker_prevents_second_wake():
-    """TC-02: idempotentność — jedno budzenie per incydent."""
+    """TC-02: idempotency — exactly one wake per incident."""
     job = make_job()
     parent = context_with({"j1": job})
     get = registry_of(parent).get
@@ -141,8 +143,8 @@ async def test_tc_d19a_02_marker_prevents_second_wake():
 
 
 async def test_tc_d19a_03_missing_parallel_jobs_key_is_noop():
-    """TC-03: brak klucza _parallel_jobs = noop, zero communicate."""
-    parent = StubContext(id="parent1")  # brak danych
+    """TC-03: missing _parallel_jobs key = noop, zero communicate calls."""
+    parent = StubContext(id="parent1")  # no data at all
 
     report = await WATCHDOG.tick(
         contexts=[parent], context_get=registry_of(parent).get
@@ -154,7 +156,7 @@ async def test_tc_d19a_03_missing_parallel_jobs_key_is_noop():
 
 
 async def test_tc_d19a_04_empty_jobs_dict_is_noop():
-    """TC-04: pusty słownik jobów = noop."""
+    """TC-04: empty jobs dict = noop."""
     parent = context_with({})
 
     report = await WATCHDOG.tick(
@@ -167,7 +169,7 @@ async def test_tc_d19a_04_empty_jobs_dict_is_noop():
 
 
 async def test_tc_d19a_05_non_dict_jobs_value_is_noop():
-    """TC-05: śmieciowa wartość pod _parallel_jobs = noop bez wyjątku."""
+    """TC-05: garbage value under _parallel_jobs = noop, no exception."""
     parent = context_with("garbage-not-a-dict")  # type: ignore[arg-type]
 
     report = await WATCHDOG.tick(
@@ -180,7 +182,7 @@ async def test_tc_d19a_05_non_dict_jobs_value_is_noop():
 
 
 async def test_tc_d19a_06_timeout_state_wakes_parent():
-    """TC-06: stan timeout tak samo budzi (jest ukryty z [EXTRAS])."""
+    """TC-06: the timeout state wakes as well (hidden from [EXTRAS])."""
     job = make_job(state="timeout", error="await timeout", parent_context_id="p1")
     parent = context_with({"j1": job}, context_id="p1")
 
@@ -196,7 +198,7 @@ async def test_tc_d19a_06_timeout_state_wakes_parent():
 
 
 async def test_tc_d19a_07_cancelled_state_wakes_parent():
-    """TC-07: stan cancelled tak samo budzi (ukryty z [EXTRAS])."""
+    """TC-07: the cancelled state wakes as well (hidden from [EXTRAS])."""
     job = make_job(state="cancelled", error="killed", parent_context_id="p1")
     parent = context_with({"j1": job}, context_id="p1")
 
@@ -211,7 +213,7 @@ async def test_tc_d19a_07_cancelled_state_wakes_parent():
 
 
 async def test_tc_d19a_08_pending_running_do_not_wake():
-    """TC-08 (errata): pending/running nie budzą — job jeszcze trwa."""
+    """TC-08 (errata): pending/running do not wake — job still running."""
     jobs = {
         "pend": make_job(job_id="job-pend", state="pending", error=None),
         "run": make_job(job_id="job-run", state="running", error=None),
@@ -228,10 +230,10 @@ async def test_tc_d19a_08_pending_running_do_not_wake():
 
 
 async def test_tc_d19a_09_missing_parent_context_falls_back_to_own_context():
-    """TC-09: kontekst parenta nie istnieje -> brak wyjątku, communicate
-    na własny (skanowany) kontekst — odporność wg briefu D19-A."""
+    """TC-09: parent context missing -> no exception, communicate on the
+    scanned (own) context — resilience per brief D19-A."""
     job = make_job(parent_context_id="ghost")
-    parent = context_with({"j1": job})  # rejestr żyje w parent1
+    parent = context_with({"j1": job})  # the registry lives in parent1
 
     report = await WATCHDOG.tick(
         contexts=[parent], context_get=lambda cid: None
@@ -244,8 +246,8 @@ async def test_tc_d19a_09_missing_parent_context_falls_back_to_own_context():
 
 
 async def test_tc_d19a_10_failed_communicate_retried_next_tick():
-    """TC-10: communicate rzuca -> tick nie rzuca, brak markera, retry
-    w następnym ticku (marker dopiero po udanym deliverze)."""
+    """TC-10: communicate raises -> tick does not raise, no marker,
+    retried next tick (marker only after a successful deliver)."""
     job = make_job()
     parent = context_with({"j1": job})
     get = registry_of(parent).get
@@ -266,7 +268,7 @@ async def test_tc_d19a_10_failed_communicate_retried_next_tick():
 
 
 async def test_tc_d19a_11_multiple_contexts_all_woken():
-    """TC-11: każdy kontekst z padniętym jobem dostaje swoje budzenie."""
+    """TC-11: every context with a failed job gets its own wake."""
     job_a = make_job(job_id="job-a", parent_context_id="ctx-a")
     job_b = make_job(job_id="job-b", parent_context_id="ctx-b")
     parent_a = context_with({"a": job_a}, context_id="ctx-a")
@@ -283,7 +285,7 @@ async def test_tc_d19a_11_multiple_contexts_all_woken():
 
 
 async def test_tc_d19a_12_wake_cap_defers_rest_to_next_tick():
-    """TC-12: cap budzeń na tick (TH-C-04) — reszta w następnym ticku."""
+    """TC-12: per-tick wake cap (TH-C-04) — the rest next tick."""
     jobs = {
         f"job-{i:02d}": make_job(job_id=f"job-{i:02d}") for i in range(10)
     }
@@ -303,7 +305,7 @@ async def test_tc_d19a_12_wake_cap_defers_rest_to_next_tick():
 
 
 async def test_tc_d19a_13_garbage_registry_entries_skipped():
-    """TC-13: śmieciowe wpisy rejestru są pomijane bez wyjątku."""
+    """TC-13: garbage registry entries are skipped without exception."""
     job = make_job()
     parent = context_with({"bad1": "garbage", "bad2": 123, "j1": job})
 
@@ -317,7 +319,7 @@ async def test_tc_d19a_13_garbage_registry_entries_skipped():
 
 
 async def test_tc_d19a_14_long_error_is_truncated():
-    """TC-14: długi błąd jest ucinany (TH-D-07/TH-S-01, flood)."""
+    """TC-14: a long error is truncated (TH-D-07/TH-S-01, flood)."""
     job = make_job(error="X" * 5000)
     parent = context_with({"j1": job})
 
@@ -326,30 +328,31 @@ async def test_tc_d19a_14_long_error_is_truncated():
     text = parent.communicate_calls[0].message
     assert len(text) < 2500
     assert "X" * 100 in text
-    assert "ucięto" in text
+    assert "truncated" in text
 
 
 async def test_tc_d19a_15_missing_error_gets_fallback_text():
-    """TC-15: brak szczegółów błędu -> tekst zastępczy, bez wyjątku."""
+    """TC-15: missing error details -> fallback text, no exception."""
     job = make_job(error=None)
     parent = context_with({"j1": job})
 
     await WATCHDOG.tick(contexts=[parent], context_get=registry_of(parent).get)
 
     text = parent.communicate_calls[0].message
-    assert "brak szczegółów" in text
+    assert "no error details" in text
     assert job.id in text
 
 
 async def test_tc_d19a_16_extension_class_contract():
-    """TC-16: klasa Extension dziedziczy po helpers.extension.Extension,
-    execute jest korutyną (wymóg briefu D19-A)."""
+    """TC-16: Extension subclasses helpers.extension.Extension and
+    execute is a coroutine (brief D19-A requirement)."""
     assert issubclass(WATCHDOG.Extension, A0Extension)
     assert inspect.iscoroutinefunction(WATCHDOG.Extension.execute)
 
 
 async def test_tc_d19a_17_execute_delegates_and_never_raises(monkeypatch):
-    """TC-17: execute woła tick i połyka jego wyjątki (kontrakt job_loop)."""
+    """TC-17: execute calls tick and swallows its exceptions (job_loop
+    contract)."""
     calls: list[dict[str, Any]] = []
 
     async def fake_tick(**kwargs: Any) -> Any:
@@ -365,25 +368,26 @@ async def test_tc_d19a_17_execute_delegates_and_never_raises(monkeypatch):
         raise RuntimeError("tick boom")
 
     monkeypatch.setattr(WATCHDOG, "tick", boom)
-    await ext.execute()  # nie rzuca — żywa pętla musi przeżyć
+    await ext.execute()  # must not raise — the live loop has to survive
 
 
 async def test_tc_d19a_18_missing_worker_context_fallback_in_message():
-    """TC-18: brak worker_context_id -> jawny fallback w instrukcji."""
+    """TC-18: missing worker_context_id -> explicit fallback in the
+    resume instruction."""
     job = make_job(worker_context_id=None)
     parent = context_with({"j1": job})
 
     await WATCHDOG.tick(contexts=[parent], context_get=registry_of(parent).get)
 
     text = parent.communicate_calls[0].message
-    assert "context_id=<brak>" in text
+    assert "context_id=<none>" in text
     assert "reset:false" in text
     assert "call_subordinate" in text
 
 
 async def test_tc_d19a_19_default_seams_noop_on_empty_registry():
-    """TC-19: domyślne seamy (AgentContext.all/get) — pusty rejestr = noop
-    bez wyjątku (proces testowy nie ma żywych kontekstów A0)."""
+    """TC-19: default seams (AgentContext.all/get) — empty registry =
+    quiet noop (the test process has no live A0 contexts)."""
     report = await WATCHDOG.tick()
 
     assert report.woken == 0
@@ -391,8 +395,8 @@ async def test_tc_d19a_19_default_seams_noop_on_empty_registry():
 
 
 async def test_tc_d19a_20_success_job_wakes_parent_with_collect_instructions():
-    """TC-20 (errata D19-A): success budzi z instrukcją odbioru wyniku,
-    BEZ instrukcji wznowienia; idempotentność jak dla pozostałych stanów."""
+    """TC-20 (D19-A errata): success wakes with the collect instruction,
+    WITHOUT any resume instruction; idempotency as for other states."""
     job = make_job(job_id="job-ok", state="success", error=None)
     parent = context_with({"ok": job})
     get = registry_of(parent).get
@@ -401,12 +405,12 @@ async def test_tc_d19a_20_success_job_wakes_parent_with_collect_instructions():
 
     assert len(parent.communicate_calls) == 1
     text = parent.communicate_calls[0].message
-    assert "zakończony sukcesem" in text
-    assert "Odbierz wynik" in text
+    assert "finished successfully" in text
+    assert "Collect the result" in text
     assert "parallel await/collect" in text
     assert f"job_ids=[{job.id}]" in text
-    assert "raport w result" in text
-    # BEZ instrukcji wznowienia — wynik do odebrania, nie do poprawiania
+    assert "report in result" in text
+    # NO resume instruction — the result is to be collected, not fixed
     assert "call_subordinate" not in text
     assert "reset:false" not in text
     assert "git log" not in text
