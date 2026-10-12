@@ -1,13 +1,13 @@
-"""Bootstrap testów _parallel_watchdog (D19-A, wzorzec _roman_transport).
+"""Bootstrap for _parallel_watchdog tests (D19-A, _roman_transport pattern).
 
-Katalog główny frameworka A0 trafia na ``sys.path``, zanim pytest zaimportuje
-moduły testowe — test importuje klasy frameworka (ParallelJob, UserMessage,
-Extension) dokładnie tak, jak żywy proces agenta.
+The A0 framework root goes on ``sys.path`` before pytest imports the test
+modules — the tests import framework classes (ParallelJob, UserMessage,
+Extension) exactly the way the live agent process does.
 
-Deterministyczność: zero sieci, zero sleep; moduł watchdog.py jest ładowany
-przez importlib tak, jak robi to loader frameworka (bez rejestracji w
-sys.modules) — patrz tests/test_parallel_watchdog.py. Rejestr
-``AgentContext._contexts`` pozostaje nietknięty (TH-D-08).
+Determinism: no network, no sleep; the watchdog.py module is loaded via
+importlib the same way the framework loader does it (no sys.modules
+registration) — see tests/test_parallel_watchdog.py. The
+``AgentContext._contexts`` registry stays untouched (TH-D-08).
 """
 
 import sys

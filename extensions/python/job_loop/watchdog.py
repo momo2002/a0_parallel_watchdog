@@ -1,28 +1,29 @@
-"""[D19-A] Watchdog terminalnych stanów jobów ``parallel`` (wake-on-error).
+"""[D19-A] Watchdog for terminal states of ``parallel`` jobs (wake-on-error).
 
-Seam frameworka: ``helpers.job_loop.scheduler_tick`` (~60 s) woła
-``call_extensions_async("job_loop")``. To rozszerzenie skanuje wtedy
-``context.data["_parallel_jobs"]`` każdego żywego kontekstu (parenta) i budzi
-bezczynnego parenta, gdy job zakończył się stanem terminalnym (errata D19-A: KAŻDYM —
-``success``/``error``/``timeout``/``cancelled``) bez flagi ``wake_reported`` —
-bez tego parent dowiaduje się dopiero z [EXTRAS] przy ręcznym await
-(~15 min); wynik ``success`` leży nieodebrany, dopóki człowiek nie napisze.
+Framework seam: ``helpers.job_loop.scheduler_tick`` (~60 s) calls
+``call_extensions_async("job_loop")``. This extension then scans
+``context.data["_parallel_jobs"]`` of every live (parent) context and wakes
+the idle parent when a job has finished in a terminal state (D19-A errata:
+ANY terminal state — ``success``/``error``/``timeout``/``cancelled``) without
+the ``wake_reported`` flag — otherwise the parent only learns about it from
+[EXTRAS] on a manual await (~15 min), and a ``success`` result sits
+uncollected until a human writes.
 
-Budzenie: ``AgentContext.get(job.parent_context_id).communicate(UserMessage(...))``
-z treścią: job_id, błąd, instrukcja wznowienia (``call_subordinate`` z
-``context_id`` workera, ``reset:false``, po inspekcji ``git log``/``find``).
-Marker ``wake_reported`` ustawiany DOPIERO po udanym ``communicate`` —
-padnięcie dostarczenia oznacza retry w następnym ticku (idempotentność:
-jeden incydent = jedno budzenie).
+Wake: ``AgentContext.get(job.parent_context_id).communicate(UserMessage(...))``
+with content: job_id, error, resume instruction (``call_subordinate`` with the
+worker's ``context_id``, ``reset:false``, after inspecting ``git log``/``find``
+in the worker tree). The ``wake_reported`` marker is set ONLY after a
+successful ``communicate`` — a failed deliver means a retry on the next tick
+(idempotency: one incident = one wake).
 
-HARD CONTRACT (wzorzec _roman_transport): ``Extension.execute`` działa w żywym
-procesie agenta — nigdy nie rzuca; każda awaria ticka jest logowana i wraca
-w następnym ticku.
+HARD CONTRACT (the _roman_transport pattern): ``Extension.execute`` runs in
+the LIVE agent process — it must NEVER raise; every tick failure is logged
+and comes back on the next tick.
 
-Uwaga: ``from __future__ import annotations`` jest ZAKAZANE — loader frameworka
-(helpers.modules.import_module) nie rejestruje modułu w sys.modules, więc
-odroczone adnotacje (PEP 563) wywalają ``@dataclass`` (incydent 2026-10-03,
-commit 622a0fa _roman_transport).
+Note: ``from __future__ import annotations`` is FORBIDDEN here — the framework
+loader (helpers.modules.import_module) does not register this module in
+sys.modules, so PEP 563 postponed annotations crash ``@dataclass``
+(incident 2026-10-03, commit 622a0fa _roman_transport).
 """
 
 from collections.abc import Callable, Iterable
@@ -37,25 +38,25 @@ from helpers.parallel_tools import (
 )
 from helpers.print_style import PrintStyle
 
-# Errata D19-A (review in vivo 2026-10-11): budzimy przy KAZDYM stanie
-# terminalnym — idle parent po dispatchu (wait:false) nie odbierze tez
-# wyniku success, dopoki czlowiek nie napisze.
+# D19-A errata (in-vivo review 2026-10-11): wake on EVERY terminal state —
+# an idle parent (after a wait:false dispatch) would never collect even a
+# success result until a human writes.
 WAKE_STATES = set(TERMINAL_STATES)
 MARKER_ATTR = "wake_reported"
 MAX_WAKES_PER_TICK = 8
 MAX_ERROR_CHARS = 1000
 
 STATE_LABELS = {
-    "error": "zakończony błędem",
-    "timeout": "zakończony timeoutem (timeout)",
-    "cancelled": "anulowany (cancelled)",
-    "success": "zakończony sukcesem",
+    "error": "finished with error",
+    "timeout": "timed out (timeout)",
+    "cancelled": "cancelled",
+    "success": "finished successfully",
 }
 
 
 @dataclass
 class TickReport:
-    """Wynik jednego ticku (oracle dla testów; źródło logów)."""
+    """One tick outcome (oracle for tests; source for log lines)."""
 
     scanned_contexts: int = 0
     woken: int = 0
@@ -65,59 +66,59 @@ class TickReport:
 
 
 def _default_contexts() -> list[Any]:
-    """Domyślny seam: wszystkie żywe konteksty (lazy import, lekki moduł)."""
+    """Default seam: all live contexts (lazy import, lightweight module)."""
     from agent import AgentContext
 
     return list(AgentContext.all())
 
 
 def _default_context_get(context_id: str) -> Any:
-    """Domyślny seam: lookup kontekstu parenta po id."""
+    """Default seam: parent context lookup by id."""
     from agent import AgentContext
 
     return AgentContext.get(context_id)
 
 
 def _clip_error(error: str) -> str:
-    """Utnij nadmiernie długi błąd (TH-D-07/TH-S-01: flood, injection)."""
+    """Truncate an overly long error (TH-D-07/TH-S-01: flood, injection)."""
     if len(error) <= MAX_ERROR_CHARS:
         return error
     cut = len(error) - MAX_ERROR_CHARS
-    return error[:MAX_ERROR_CHARS] + f" ...[ucięto {cut} znaków]"
+    return error[:MAX_ERROR_CHARS] + f" ...[truncated {cut} chars]"
 
 
 def build_wake_message(job: ParallelJob) -> str:
-    """Treść budzenia per stan (errata D19-A: success -> odbiór wyniku).
+    """Wake content per state (D19-A errata: success -> collect the result).
 
-    ``error``/``timeout``/``cancelled``: job_id, błąd, instrukcja wznowienia
-    (``call_subordinate`` z kontekstem workera, ``reset:false``). ``success``:
-    instrukcja odbioru wyniku przez ``parallel await/collect`` — BEZ
-    instrukcji wznowienia (nic nie jest zepsute, wynik czeka nieodebrany).
+    ``error``/``timeout``/``cancelled``: job_id, error, resume instruction
+    (``call_subordinate`` with the worker context, ``reset:false``).
+    ``success``: collect instruction via ``parallel await/collect`` — WITHOUT
+    any resume instruction (nothing is broken, the result sits uncollected).
     """
     state = str(job.state)
     if state == "success":
-        # treść 1:1 z erraty D19-A (bez tool_name — komunikat krótki,
-        # narzędzie i tak widać w rekordzie joba)
+        # content 1:1 from the D19-A errata (no tool_name — keep the message
+        # short; the tool is visible in the job record anyway)
         return (
-            f"[parallel-watchdog] Job {job.id} zakończony sukcesem. "
-            "Odbierz wynik przez "
-            f"parallel await/collect job_ids=[{job.id}] (raport w result)."
+            f"[parallel-watchdog] Job {job.id} finished successfully. "
+            "Collect the result via "
+            f"parallel await/collect job_ids=[{job.id}] (report in result)."
         )
-    label = STATE_LABELS.get(state, f"stan terminalny {state}")
-    error = str(job.error or "").strip() or "brak szczegółów błędu"
+    label = STATE_LABELS.get(state, f"terminal state {state}")
+    error = str(job.error or "").strip() or "no error details available"
     error = _clip_error(error)
-    worker = str(job.worker_context_id or "").strip() or "<brak>"
+    worker = str(job.worker_context_id or "").strip() or "<none>"
     lines = [
         f"[parallel-watchdog] Job {job.id} ({job.tool_name}) {label}: {error}.",
-        "Wznów przez call_subordinate "
-        f"context_id={worker} reset:false, po inspekcji git log/find "
-        "w drzewie workera (jeśli kontekst workera nie istnieje, nie wznawiaj).",
+        "Resume via call_subordinate "
+        f"context_id={worker} reset:false, after inspecting git log/find "
+        "in the worker tree (if the worker context does not exist, do not resume).",
     ]
     return "\n".join(lines)
 
 
 def _wake(context: Any, job: ParallelJob) -> None:
-    """Wyślij komunikat budzący do kontekstu (UserMessage jak z API)."""
+    """Send the wake message to the context (UserMessage like the API)."""
     from agent import UserMessage
 
     context.communicate(UserMessage(message=build_wake_message(job)))
@@ -128,15 +129,15 @@ async def tick(
     contexts: Iterable[Any] | None = None,
     context_get: Callable[[str], Any] | None = None,
 ) -> TickReport:
-    """Jeden tick watchdoga (seamy wstrzykiwalne dla testów).
+    """One watchdog tick (seams injectable for tests).
 
-    Flow per kontekst: ``context.data['_parallel_jobs']`` (brak/pusty/
-    nie-słownik = cicho dalej) -> job w stanie terminalnym (``WAKE_STATES``,
-    errata D19-A) bez markera
-    -> ``communicate`` na kontekście parenta; gdy parent nie istnieje,
-    na własnym (skanowanym) kontekście wg briefu D19-A. Marker ustawiany
-    po udanym dostarczeniu; budżet ``MAX_WAKES_PER_TICK`` chroni przed
-    burzą wybudzeń (TH-C-04) — nadmiar w następnym ticku.
+    Flow per context: ``context.data['_parallel_jobs']`` (missing/empty/
+    non-dict = quietly skip) -> a job in a terminal state (``WAKE_STATES``,
+    D19-A errata) without the marker
+    -> ``communicate`` on the parent context; when the parent does not exist,
+    on the scanned (own) context per brief D19-A. The marker is set only
+    after a successful deliver; the ``MAX_WAKES_PER_TICK`` budget guards
+    against wake storms (TH-C-04) — the rest goes to the next tick.
     """
     if contexts is None:
         contexts = _default_contexts()
@@ -192,11 +193,11 @@ async def tick(
 
 
 class Extension(extension.Extension):
-    """Punkt wejścia job_loop (nigdy nie rzuca — kontrakt żywej pętli)."""
+    """job_loop entry point (never raises — live-loop contract)."""
 
     async def execute(self, **kwargs: Any) -> None:
-        """Jeden tick watchdoga; każda awaria logowana, nie rzucana."""
-        del kwargs  # job_loop nie przekazuje argumentów
+        """One watchdog tick; every failure is logged, never raised."""
+        del kwargs  # job_loop passes no arguments
         try:
             report = await tick()
             if report.woken or report.errors:
@@ -205,5 +206,5 @@ class Extension(extension.Extension):
                     f"already={report.already_reported} "
                     f"deferred={report.deferred} errors={report.errors}"
                 )
-        except Exception as exc:  # noqa: BLE001 — żywa pętla musi przeżyć
+        except Exception as exc:  # noqa: BLE001 — the live loop must survive
             PrintStyle.error(f"parallel-watchdog tick error: {exc}")
