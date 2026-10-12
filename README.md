@@ -1,4 +1,4 @@
-# _parallel_watchdog
+# parallel_watchdog
 
 **Parallel Watchdog** — wake idle parent agents when `parallel` jobs finish.
 
@@ -37,7 +37,7 @@ a short message whenever a parallel job reaches a terminal state.
 Clone or copy this directory into your Agent Zero plugins folder:
 
 ```
-usr/plugins/_parallel_watchdog/
+usr/plugins/parallel_watchdog/
 ```
 
 then restart the WebUI — `job_loop` extensions load at process start. No settings,
@@ -48,7 +48,7 @@ no configuration.
 ```
 plugin.yaml                              # manifest (loader reads plugin.yaml)
 extensions/python/job_loop/watchdog.py  # tick + Extension
-tests/test_parallel_watchdog.py          # unit tests (in-memory stubs)
+tests/testparallel_watchdog.py          # unit tests (in-memory stubs)
 ```
 
 ## Tests
