@@ -421,3 +421,98 @@ async def test_tc_d19a_20_success_job_wakes_parent_with_collect_instructions():
     assert len(parent.communicate_calls) == 1
     assert report2.woken == 0
     assert report2.already_reported == 1
+
+# ----------------------------------------------------------------------------
+# system_prompt extension (_10_watchdog_prompt) — watchdog-first async dispatch
+# ----------------------------------------------------------------------------
+
+_PROMPT_PATH = (
+    _REPO_ROOT / "extensions" / "python" / "system_prompt" / "_10_watchdog_prompt.py"
+)
+
+_PROMPT_SPEC = importlib.util.spec_from_file_location(
+    "parallel_watchdog_prompt_ext", _PROMPT_PATH
+)
+assert _PROMPT_SPEC is not None and _PROMPT_SPEC.loader is not None
+WATCHDOG_PROMPT: Any = importlib.util.module_from_spec(_PROMPT_SPEC)
+_PROMPT_SPEC.loader.exec_module(WATCHDOG_PROMPT)
+
+
+@dataclass
+class StubAgent:
+    """Fake Agent: configurable read_prompt, recorded no other state."""
+
+    read_prompt_error: Exception | None = None
+    read_prompt_result: str | None = None
+    read_prompt_calls: list[str] = field(default_factory=list)
+
+    def read_prompt(self, file: str, **kwargs: Any) -> str:
+        self.read_prompt_calls.append(file)
+        if self.read_prompt_error:
+            raise self.read_prompt_error
+        if self.read_prompt_result is not None:
+            return self.read_prompt_result
+        raise FileNotFoundError(f"no stub prompt for {file}")
+
+
+async def test_tc_pw_01_extension_class_and_guard_contract():
+    """TC-PW-01: Extension subclasses helpers.extension.Extension, execute
+    is a coroutine, and a missing agent is a quiet no-op."""
+    assert issubclass(WATCHDOG_PROMPT.Extension, A0Extension)
+    assert inspect.iscoroutinefunction(WATCHDOG_PROMPT.Extension.execute)
+
+    ext = WATCHDOG_PROMPT.Extension(agent=None)
+    system_prompt: list[str] = []
+    await ext.execute(system_prompt=system_prompt)
+    assert system_prompt == []
+
+
+async def test_tc_pw_02_appends_nonempty_section_with_read_prompt():
+    """TC-PW-02: with a live agent the extension loads
+    agent.system.watchdog.md via agent.read_prompt and appends a non-empty
+    section to system_prompt."""
+    agent = StubAgent(
+        read_prompt_result="# Watchdog-first async dispatch\n\nStay idle after dispatch.\n"
+    )
+    ext = WATCHDOG_PROMPT.Extension(agent=agent)  # type: ignore[arg-type]
+    system_prompt: list[str] = []
+
+    await ext.execute(system_prompt=system_prompt)
+
+    assert agent.read_prompt_calls == ["agent.system.watchdog.md"]
+    assert len(system_prompt) == 1
+    assert system_prompt[0].strip() != ""
+
+
+async def test_tc_pw_03_section_contains_key_phrases():
+    """TC-PW-03: the deployed prompt file contains the key rules: terminal
+    state, collect results, no manual polling, no tree deletion after crash."""
+    agent = StubAgent(
+        read_prompt_result=(
+            _REPO_ROOT / "prompts" / "agent.system.watchdog.md"
+        ).read_text(encoding="utf-8")
+    )
+    ext = WATCHDOG_PROMPT.Extension(agent=agent)  # type: ignore[arg-type]
+    system_prompt: list[str] = []
+
+    await ext.execute(system_prompt=system_prompt)
+
+    text = system_prompt[0]
+    assert "terminal state" in text
+    assert "collect" in text
+    assert "poll" in text
+    assert "git log" in text or "find" in text
+
+
+async def test_tc_pw_04_read_prompt_failure_falls_back_and_never_raises():
+    """TC-PW-04: a read_prompt failure never raises — the inline fallback
+    constant is appended instead (hooks MUST NEVER raise)."""
+    agent = StubAgent(read_prompt_error=RuntimeError("prompt fs boom"))
+    ext = WATCHDOG_PROMPT.Extension(agent=agent)  # type: ignore[arg-type]
+    system_prompt: list[str] = []
+
+    await ext.execute(system_prompt=system_prompt)  # must not raise
+
+    assert len(system_prompt) == 1
+    assert system_prompt[0].strip() != ""
+    assert "terminal state" in system_prompt[0]
