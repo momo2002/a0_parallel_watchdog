@@ -548,12 +548,19 @@ def test_tc_pw_05_prompt_prefers_parallel_for_subordinate_threads():
 
 
 def test_tc_pw_06_new_section_stays_ascii_and_self_contained():
-    """TC-PW-06: the new section is EN-only ASCII and carries no internal
-    references (cluster/pod names, D-numbers, private hosts)."""
-    text = _prompt_text()
-    lowered = text.lower()
+    """TC-PW-06: the appended section is EN-only ASCII and carries no
+    internal references (cluster/pod names, D-numbers, private hosts).
 
-    assert text.isascii()
+    Scope note: the pre-existing watchdog-first section is frozen 1:1 by
+    TC-PW-07 and may keep its original typography, so ASCII and hygiene
+    checks apply to the appended section only."""
+    text = _prompt_text()
+    marker = "### Continue subordinate threads with `parallel`"
+    assert marker in text
+    appended = text[text.index(marker) :]
+    lowered = appended.lower()
+
+    assert appended.isascii()
     for forbidden in ("gitea", "kurjerzy", "pod,", "d19-", "errata"):
         assert forbidden not in lowered
 
