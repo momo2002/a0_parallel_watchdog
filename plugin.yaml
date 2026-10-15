@@ -1,6 +1,6 @@
 name: a0_parallel_watchdog
 title: Parallel Watchdog
-description: Wake idle parent agents when parallel jobs reach a terminal state (success, error, timeout, cancelled) — job_loop tick extension, wake-on-terminal-state.
+description: Wake idle parent agents when parallel jobs reach a terminal state (success, error, timeout, cancelled) and inject a watchdog-first async-dispatch rule into the agent system prompt — job_loop tick + system_prompt extensions.
 version: 0.2.0
 settings_sections: []
 per_project_config: false
