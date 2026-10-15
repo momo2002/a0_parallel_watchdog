@@ -516,3 +516,65 @@ async def test_tc_pw_04_read_prompt_failure_falls_back_and_never_raises():
     assert len(system_prompt) == 1
     assert system_prompt[0].strip() != ""
     assert "terminal state" in system_prompt[0]
+
+
+# ----------------------------------------------------------------------------
+# prompt content — preferred subordinate path via `parallel` (v0.2.1)
+# ----------------------------------------------------------------------------
+
+_PROMPT_FILE = _REPO_ROOT / "prompts" / "agent.system.watchdog.md"
+_PLUGIN_FILE = _REPO_ROOT / "plugin.yaml"
+
+
+def _prompt_text() -> str:
+    """Deployed prompt file as shipped to every agent."""
+    return _PROMPT_FILE.read_text(encoding="utf-8")
+
+
+def test_tc_pw_05_prompt_prefers_parallel_for_subordinate_threads():
+    """TC-PW-05: the deployed prompt file spells out the preferred path —
+    dispatch and continue subordinate threads through `parallel` so the
+    watchdog can watch them (`reset: true` first, `context_id` with
+    `reset: false` to continue the same child thread)."""
+    text = _prompt_text()
+
+    assert "### Continue subordinate threads with `parallel`" in text
+    assert "preferred" in text
+    assert "call_subordinate" in text
+    assert "context_id" in text
+    assert "reset: true" in text
+    assert "reset: false" in text
+    assert "job.worker_context_id" in text
+
+
+def test_tc_pw_06_new_section_stays_ascii_and_self_contained():
+    """TC-PW-06: the new section is EN-only ASCII and carries no internal
+    references (cluster/pod names, D-numbers, private hosts)."""
+    text = _prompt_text()
+    lowered = text.lower()
+
+    assert text.isascii()
+    for forbidden in ("gitea", "kurjerzy", "pod,", "d19-", "errata"):
+        assert forbidden not in lowered
+
+
+def test_tc_pw_07_watchdog_first_section_preserved_verbatim():
+    """TC-PW-07: the existing watchdog-first async dispatch section stays
+    1:1 — the new section is appended, the old rules are not rewritten."""
+    text = _prompt_text()
+
+    assert "# Watchdog-first async dispatch (parallel jobs)" in text
+    assert "busy-wait for results" in text
+    assert "wake notice" in text
+    assert "Never delete a subordinate's working tree" in text
+    assert text.index("# Watchdog-first async dispatch") < text.index(
+        "### Continue subordinate threads with `parallel`"
+    )
+
+
+def test_tc_pw_08_plugin_yaml_version_is_0_2_1():
+    """TC-PW-08: plugin.yaml advertises the prompt-only release 0.2.1."""
+    manifest = _PLUGIN_FILE.read_text(encoding="utf-8")
+
+    assert "version: 0.2.1" in manifest
+    assert "version: 0.2.0" not in manifest
